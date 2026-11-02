@@ -275,8 +275,13 @@ test("injects native system history at assistant boundaries", () => {
     type: "ephemeral",
     ttl: "1h",
   });
-  assert.deepEqual(
+  // The trailing system reminder changes every request, so the marker sits on the last user message.
+  assert.equal(
     (rewritten.messages.at(-1)?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
+    undefined,
+  );
+  assert.deepEqual(
+    (rewritten.messages[4]?.content as Array<Record<string, unknown>>).at(-1)?.cache_control,
     { type: "ephemeral", ttl: "1h" },
   );
 });
@@ -324,9 +329,8 @@ test("keeps one breakpoint in a pre-marked multi-block final message (issue #10)
           )
         : 0;
   assert.ok(count(rewritten) <= 4, `found ${count(rewritten)} cache_control markers`);
-  const final = rewritten.messages.at(-1).content as Array<Record<string, unknown>>;
-  assert.equal(final[0]?.cache_control, undefined);
-  assert.deepEqual(final.at(-1)?.cache_control, marker);
+  const lastUser = rewritten.messages.findLast((m: WireMessage) => m.role === "user").content as Array<Record<string, unknown>>;
+  assert.deepEqual(lastUser.at(-1)?.cache_control, marker);
 });
 
 const userFrame = (text: string) => ({
@@ -360,6 +364,30 @@ for (const key of [
   });
 }
 
+test("next request reads the cache entry the previous request wrote", () => {
+  const user = (text: string) => ({ role: "user", content: [{ type: "text", text }] });
+  const assistant = (text: string) => ({ role: "assistant", content: [{ type: "text", text }] });
+  const reminder = { role: "system", content: [{ type: "text", text: "tokens left" }] };
+  const history = [user("q"), assistant("a1"), user("r1"), assistant("a2"), user("r2")];
+  const rewrite = (messages: unknown[]) =>
+    JSON.parse(
+      rewriteInitialRequest(Buffer.from(JSON.stringify({ messages })), framesFor(messages as WireMessage[]), undefined, [
+        { beforeAssistant: null, content: reminder.content },
+      ]).toString("utf8"),
+    ) as { messages: Array<{ content: Array<Record<string, unknown>> }> };
+  const markedPrefix = (messages: Array<{ content: Array<Record<string, unknown>> }>) =>
+    messages
+      .map((message, index) => (message.content.some((block) => block.cache_control) ? index : -1))
+      .filter((index) => index >= 0)
+      .map((index) => JSON.stringify(messages.slice(0, index + 1).map((m) => withoutMarkers(m))));
+  const withoutMarkers = (value: unknown): unknown => JSON.parse(JSON.stringify(value).replace(/,"cache_control":\{[^}]*\}/g, ""));
+
+  const previous = rewrite(history);
+  const next = rewrite([...history, assistant("a3"), user("r3")]);
+  const written = markedPrefix(previous.messages).at(-1)!;
+  assert.ok(markedPrefix(next.messages).includes(written), "previous final breakpoint must be a breakpoint prefix of the next request");
+});
+
 test("caps rewritten requests at four cache breakpoints", () => {
   const cc = { type: "ephemeral", ttl: "1h" };
   const body = {
@@ -382,7 +410,7 @@ test("caps rewritten requests at four cache breakpoints", () => {
   );
   const count = (JSON.stringify(rewritten).match(/"cache_control"/g) ?? []).length;
   assert.equal(count, 4);
-  assert.deepEqual(rewritten.messages.at(-1).content.at(-1).cache_control, cc);
+  assert.deepEqual(rewritten.messages[3].content.at(-1).cache_control, cc);
 });
 
 test("runs a request through a stream-json Claude executable with an inherited API key", async () => {

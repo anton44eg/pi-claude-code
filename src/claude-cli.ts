@@ -723,7 +723,9 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
     }
     setCacheBreakpoint(messages[userIndexes.at(-2)!]!);
   }
-  const final = messages.at(-1);
+  // Mark the last user message, not a trailing system reminder: Claude Code
+  // drops that reminder on the next request, so a marker after it never hits.
+  const final = messages[userIndexes.at(-1) ?? messages.length - 1];
   if (final) setCacheBreakpoint(final);
 }
 
@@ -901,8 +903,8 @@ function capCacheBreakpoints(payload: { messages?: NativeRequestMessage[]; syste
   const prefix = [...holders(payload.tools), ...holders(payload.system)];
   const inMessages = (payload.messages ?? []).flatMap((message) => holders(message.content));
   let excess = prefix.length + inMessages.length - MAX_CACHE_BREAKPOINTS;
-  // Keep the final message marker; remove older message markers, then prefix markers.
-  for (const block of [...inMessages.slice(0, -1), ...prefix]) {
+  // Keep the last two message markers (this turn's write and next turn's read point) longest.
+  for (const block of [...inMessages.slice(0, -2), ...prefix, ...inMessages.slice(-2, -1)]) {
     if (excess <= 0) break;
     delete block.cache_control;
     excess -= 1;
