@@ -388,6 +388,24 @@ test("next request reads the cache entry the previous request wrote", () => {
   assert.ok(markedPrefix(next.messages).includes(written), "previous final breakpoint must be a breakpoint prefix of the next request");
 });
 
+test("accepts a string first user message from Claude Code", () => {
+  const body = {
+    messages: [
+      { role: "user", content: "/tmp/HANDOFF.md" },
+      { role: "system", content: [] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "read", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "x" }] },
+      { role: "system", content: [{ type: "text", text: "date" }] },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), undefined, [{ type: "text", text: "/tmp/HANDOFF.md" }], [
+      { role: "system", content: [{ type: "text", text: "env" }] },
+    ]).toString("utf8"),
+  );
+  assert.deepEqual(rewritten.messages[0].content, [{ type: "text", text: "/tmp/HANDOFF.md" }]);
+});
+
 test("caps rewritten requests at four cache breakpoints", () => {
   const cc = { type: "ephemeral", ttl: "1h" };
   const body = {

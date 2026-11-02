@@ -861,6 +861,10 @@ export function rewriteInitialRequest(
   };
   let messages = payload.messages;
   const first = messages?.[0];
+  // Claude Code may send a plain-text first message as a string; it is equivalent to one text block.
+  if (first?.role === "user" && typeof first.content === "string") {
+    first.content = [{ type: "text", text: first.content }];
+  }
   if (first?.role !== "user" || !Array.isArray(first.content)) {
     throw new Error("Claude Code request is missing its initial user message");
   }
