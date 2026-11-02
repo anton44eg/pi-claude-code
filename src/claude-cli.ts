@@ -885,8 +885,28 @@ export function rewriteInitialRequest(
     normalizeLeadingSystemCache(payload.system);
   }
   if (initialSystemMessages?.length || nativeSystemInjections) setReplayCacheBreakpoints(messages!);
+  capCacheBreakpoints(payload);
 
   return Buffer.from(JSON.stringify(payload));
+}
+
+const MAX_CACHE_BREAKPOINTS = 4;
+
+/** Anthropic rejects requests with more than four cache_control blocks. Drop the oldest message markers first. */
+function capCacheBreakpoints(payload: { messages?: NativeRequestMessage[]; system?: unknown; tools?: unknown }): void {
+  const holders = (value: unknown): Array<Record<string, unknown>> =>
+    Array.isArray(value)
+      ? value.filter((b): b is Record<string, unknown> => !!b && typeof b === "object" && "cache_control" in b)
+      : [];
+  const prefix = [...holders(payload.tools), ...holders(payload.system)];
+  const inMessages = (payload.messages ?? []).flatMap((message) => holders(message.content));
+  let excess = prefix.length + inMessages.length - MAX_CACHE_BREAKPOINTS;
+  // Keep the final message marker; remove older message markers, then prefix markers.
+  for (const block of [...inMessages.slice(0, -1), ...prefix]) {
+    if (excess <= 0) break;
+    delete block.cache_control;
+    excess -= 1;
+  }
 }
 
 const CLAUDE_PROCESS_MAX_AGE_MS = 5 * 60 * 1_000;

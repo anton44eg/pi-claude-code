@@ -360,6 +360,31 @@ for (const key of [
   });
 }
 
+test("caps rewritten requests at four cache breakpoints", () => {
+  const cc = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    tools: [{ name: "a" }, { name: "b", cache_control: cc }],
+    system: [
+      { type: "text", text: "identity", cache_control: cc },
+      { type: "text", text: "prompt", cache_control: cc },
+    ],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "first" }] },
+      { role: "system", content: [{ type: "text", text: "environment", cache_control: cc }] },
+      { role: "assistant", content: [{ type: "text", text: "one" }] },
+      { role: "user", content: [{ type: "text", text: "second", cache_control: cc }] },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(body.messages), undefined, [
+      { beforeAssistant: null, content: [{ type: "text", text: "late" }] },
+    ]).toString("utf8"),
+  );
+  const count = (JSON.stringify(rewritten).match(/"cache_control"/g) ?? []).length;
+  assert.equal(count, 4);
+  assert.deepEqual(rewritten.messages.at(-1).content.at(-1).cache_control, cc);
+});
+
 test("runs a request through a stream-json Claude executable with an inherited API key", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-claude-code-test-"));
   const workingRoot = await realpath(root);
