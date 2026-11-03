@@ -27,6 +27,16 @@ test("formats both plan windows with time until reset", () => {
   assert.equal(formatPlanUsage(info, NOW), "Claude 5h 2% (1h35m) · 7d 3% (2d20h)");
 });
 
+test("includes the Fable weekly window when present", () => {
+  const withFable = {
+    unifiedWindows: {
+      ...info.unifiedWindows,
+      seven_day_overage_included: { utilization: 0.41, resetsAt: 1_793_955_600, status: "allowed" },
+    },
+  };
+  assert.equal(formatPlanUsage(withFable, NOW), "Claude 5h 2% (1h35m) · 7d 3% (2d20h) · Fable 41% (2d20h)");
+});
+
 test("omits missing windows and clamps past resets", () => {
   const partial = { unifiedWindows: { five_hour: { utilization: 1, resetsAt: NOW / 1000 - 60 } } };
   assert.equal(formatPlanUsage(partial, NOW), "Claude 5h 100% (0m)");

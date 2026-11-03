@@ -6,6 +6,8 @@
 const WINDOWS = [
   ["five_hour", "5h"],
   ["seven_day", "7d"],
+  // Claude Code labels this window "Fable limit".
+  ["seven_day_overage_included", "Fable"],
 ] as const;
 
 type Window = { utilization?: unknown; resetsAt?: unknown };
