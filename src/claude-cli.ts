@@ -713,11 +713,13 @@ function setReplayCacheBreakpoints(messages: NativeRequestMessage[]): void {
   const userIndexes = messages
     .map((message, index) => (message.role === "user" ? index : -1))
     .filter((index) => index >= 0);
-  if (userIndexes.length >= 3) {
-    // Claude permits four cache breakpoints. Its two system-prompt markers
-    // consume half of them, so once a prior queried user exists, move the
-    // native environment marker to that exact previous query boundary. This
-    // avoids relying on automatic lookback (notably unreliable with images).
+  // Claude permits four cache breakpoints. Its two system-prompt markers
+  // consume half of them, so once a prior queried user exists, move the
+  // native markers (environment, trailing reminder) to that exact previous
+  // query boundary. This avoids relying on automatic lookback (notably
+  // unreliable with images) and never spends a slot on the trailing reminder,
+  // which Claude Code replaces every request so its marker can never hit.
+  if (userIndexes.length >= 2) {
     for (const message of messages) {
       if (message.role === "system") message.content = withoutCacheControl(message.content);
     }

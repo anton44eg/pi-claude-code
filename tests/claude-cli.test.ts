@@ -399,11 +399,14 @@ test("accepts a string first user message from Claude Code", () => {
     ],
   };
   const rewritten = JSON.parse(
-    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), undefined, [{ type: "text", text: "/tmp/HANDOFF.md" }], [
-      { role: "system", content: [{ type: "text", text: "env" }] },
-    ]).toString("utf8"),
+    rewriteInitialRequest(
+      Buffer.from(JSON.stringify(body)),
+      [userFrame("/tmp/HANDOFF.md"), ...framesFor(body.messages.slice(1))],
+      [{ role: "system", content: [{ type: "text", text: "env" }] }],
+    ).toString("utf8"),
   );
-  assert.deepEqual(rewritten.messages[0].content, [{ type: "text", text: "/tmp/HANDOFF.md" }]);
+  assert.equal(rewritten.messages[0].content[0].text, "/tmp/HANDOFF.md");
+  assert.equal(rewritten.messages[0].content.length, 1);
 });
 
 test("caps rewritten requests at four cache breakpoints", () => {
@@ -429,6 +432,41 @@ test("caps rewritten requests at four cache breakpoints", () => {
   const count = (JSON.stringify(rewritten).match(/"cache_control"/g) ?? []).length;
   assert.equal(count, 4);
   assert.deepEqual(rewritten.messages[3].content.at(-1).cache_control, cc);
+});
+
+test("spends the marker slots on user boundaries, not the trailing reminder, after the first tool call", () => {
+  // Shape captured live from Claude Code 2.1.317: the request after the first tool result.
+  const cc = { type: "ephemeral", ttl: "1h" };
+  const body = {
+    tools: [{ name: "read" }, { name: "bash", cache_control: cc }],
+    system: [
+      { type: "text", text: "billing" },
+      { type: "text", text: "identity", cache_control: cc },
+      { type: "text", text: "prompt", cache_control: cc },
+    ],
+    messages: [
+      { role: "user", content: [{ type: "text", text: "run echo hi" }] },
+      { role: "system", content: "environment" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t", name: "bash", input: {} }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t", content: "hi" }] },
+      {
+        role: "system",
+        content: [
+          { type: "text", text: "date", cache_control: cc },
+          { type: "text", text: "nudge" },
+        ],
+      },
+    ],
+  };
+  const rewritten = JSON.parse(
+    rewriteInitialRequest(Buffer.from(JSON.stringify(body)), framesFor(body.messages), [
+      { role: "system", content: [{ type: "text", text: "environment" }] },
+    ]).toString("utf8"),
+  ) as { messages: Array<{ role: string; content: Array<Record<string, unknown>> }> };
+  const marked = rewritten.messages.flatMap((message, index) =>
+    message.content.some((block) => block.cache_control) ? [`${index}:${message.role}`] : [],
+  );
+  assert.deepEqual(marked, ["0:user", "3:user"]);
 });
 
 test("runs a request through a stream-json Claude executable with an inherited API key", async () => {
