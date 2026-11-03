@@ -1,4 +1,4 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getClaudeStatus } from "./claude-cli.ts";
 import { formatPlanUsage, latestRateLimit } from "./plan-usage.ts";
 import { claudeCodeEnv, createClaudeCodeProvider } from "./provider.ts";
@@ -6,17 +6,25 @@ import { claudeCodeEnv, createClaudeCodeProvider } from "./provider.ts";
 export default function claudeCodeExtension(pi: ExtensionAPI): void {
   pi.registerProvider(createClaudeCodeProvider());
 
+  // Keyed after pi-usage's "usage" status so both sit together in the footer.
+  const STATUS_KEY = "usage-claude-code";
+  let planUsage: string | undefined;
+  const showPlanUsage = (ctx: ExtensionContext, provider = ctx.model?.provider) =>
+    ctx.ui.setStatus(STATUS_KEY, provider === "claude-code" ? planUsage : undefined);
+
   pi.on("session_start", (_event, ctx) => {
     const messages = ctx.sessionManager
       .getBranch()
       .flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
-    const status = formatPlanUsage(latestRateLimit(messages));
-    if (status) ctx.ui.setStatus("claude-code", status);
+    planUsage = formatPlanUsage(latestRateLimit(messages));
+    showPlanUsage(ctx);
   });
 
+  pi.on("model_select", (event, ctx) => showPlanUsage(ctx, event.model.provider));
+
   pi.on("message_end", (event, ctx) => {
-    const status = formatPlanUsage(latestRateLimit([event.message]));
-    if (status) ctx.ui.setStatus("claude-code", status);
+    planUsage = formatPlanUsage(latestRateLimit([event.message])) ?? planUsage;
+    showPlanUsage(ctx);
   });
 
   pi.registerCommand("claude-code-status", {
