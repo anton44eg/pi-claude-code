@@ -33,9 +33,16 @@ export interface NativeSystemInjection {
   content: Array<Record<string, unknown>>;
 }
 
+/** Tool names in native request order: the initial tools, then each addition at its assistant boundary. */
+export interface NativeToolLayout {
+  initial: string[];
+  additions: Array<{ beforeAssistant: number; names: string[] }>;
+}
+
 export interface NativeTranscriptPlan {
   requestTools: Array<Record<string, unknown>>;
   systemInjections: NativeSystemInjection[];
+  toolLayout: NativeToolLayout;
 }
 
 interface ReplayCarrier {
@@ -43,6 +50,7 @@ interface ReplayCarrier {
   message: NativeMessage;
   projection: AssistantProjection;
   initialSystemMessages?: unknown[];
+  toolLayout?: NativeToolLayout;
 }
 
 interface AssistantProjection {
@@ -122,6 +130,16 @@ export function getInitialSystemMessages(messages: Message[]): unknown[] | undef
     if (message?.role !== "assistant") continue;
     const value = replayCarrier(message)?.initialSystemMessages;
     if (value) return clone(value);
+  }
+  return undefined;
+}
+
+function getToolLayout(messages: Message[]): NativeToolLayout | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
+    const layout = replayCarrier(message)?.toolLayout;
+    if (layout) return clone(layout);
   }
   return undefined;
 }
@@ -337,14 +355,57 @@ function nativeSystemBlocks(message: SystemMessage): Array<Record<string, unknow
   return blocks;
 }
 
+function hasToolChange(message: Message): boolean {
+  return message.role === "system" && !!(message.toolsAdded?.length || message.toolsRemoved?.length);
+}
+
+/**
+ * Pi folds every system message into the head when an extension forces the system prompt
+ * (`before_agent_start` returning `systemPrompt`), so later tools arrive as initial tools.
+ * Re-split them by the layout recorded on the last response, so the tools array stays
+ * byte-stable and additions stay deferred. A recorded tool missing from the head means a
+ * removal, which the layout cannot express: keep the folded transcript.
+ */
+function restoreFoldedToolHistory(messages: Message[], layout: NativeToolLayout): Message[] {
+  const head = messages[0];
+  if (head?.role !== "system" || messages.slice(1).some(hasToolChange)) return messages;
+  const byName = new Map((head.toolsAdded ?? []).map((tool) => [tool.name, tool]));
+  const known = [...layout.initial, ...layout.additions.flatMap((addition) => addition.names)];
+  if (known.some((name) => !byName.has(name))) return messages;
+  const pick = (names: string[]) => names.map((name) => byName.get(name)!);
+  const additions = new Map(layout.additions.map((addition) => [addition.beforeAssistant, addition.names]));
+  const update = (names: string[]): SystemMessage => ({ role: "system", content: "", toolsAdded: pick(names), timestamp: 0 });
+
+  const output: Message[] = [{ ...head, toolsAdded: pick(layout.initial) }];
+  let assistantOrdinal = 0;
+  for (const message of messages.slice(1)) {
+    if (message.role === "assistant" && assistantContent(message).length > 0) {
+      const names = additions.get(assistantOrdinal);
+      if (names) output.push(update(names));
+      additions.delete(assistantOrdinal);
+      assistantOrdinal += 1;
+    }
+    output.push(message);
+  }
+  const knownNames = new Set(known);
+  const trailing = [
+    ...[...additions.values()].flat(),
+    ...[...byName.keys()].filter((name) => !knownNames.has(name)),
+  ];
+  if (trailing.length) output.push(update(trailing));
+  return output;
+}
+
 /**
  * Build Anthropic's cache-preserving native representation of transcript tool changes.
  * The placeholder keeps deferred-tool prompt scaffolding stable from the first request.
  */
 export function prepareNativeTranscript(
-  messages: Message[],
+  transcript: Message[],
   supported: boolean,
 ): NativeTranscriptPlan | undefined {
+  const layout = getToolLayout(transcript);
+  const messages = layout ? restoreFoldedToolHistory(transcript, layout) : transcript;
   const initial = getInitialSystemMessage(messages);
   const initialTools = initial?.toolsAdded ?? [];
   if (!supported || initialTools.length === 0 || hasToolRedefinitions(messages)) return undefined;
@@ -362,11 +423,15 @@ export function prepareNativeTranscript(
     .map((tool) => ({ ...structuredClone(nativeByName.get(tool.name)!), defer_loading: true }));
 
   const systemInjections: NativeSystemInjection[] = [];
+  const toolLayout: NativeToolLayout = { initial: [...initialNames], additions: [] };
   let pending: Array<Array<Record<string, unknown>>> = [];
+  let pendingNames: string[] = [];
   let assistantOrdinal = 0;
   const flush = (beforeAssistant: number | null) => {
     for (const content of pending) systemInjections.push({ beforeAssistant, content });
+    if (pendingNames.length) toolLayout.additions.push({ beforeAssistant: assistantOrdinal, names: pendingNames });
     pending = [];
+    pendingNames = [];
   };
 
   for (let index = 1; index < messages.length; index++) {
@@ -374,6 +439,7 @@ export function prepareNativeTranscript(
     if (message.role === "system") {
       const blocks = nativeSystemBlocks(message);
       if (blocks.length) pending.push(blocks);
+      pendingNames.push(...(message.toolsAdded ?? []).map((tool) => tool.name));
     } else if (message.role === "assistant" && assistantContent(message).length > 0) {
       flush(assistantOrdinal);
       assistantOrdinal += 1;
@@ -384,6 +450,7 @@ export function prepareNativeTranscript(
   return {
     requestTools: [...initialNative, structuredClone(DEFERRED_TOOL_PLACEHOLDER), ...laterNative],
     systemInjections,
+    toolLayout,
   };
 }
 
@@ -416,6 +483,7 @@ export function makeReplayDiagnostic(
   message: NativeMessage,
   output: AssistantMessage,
   initialSystemMessages?: unknown[],
+  toolLayout?: NativeToolLayout,
 ) {
   return {
     type: NATIVE_REPLAY_DIAGNOSTIC,
@@ -426,6 +494,7 @@ export function makeReplayDiagnostic(
         message: clone(message),
         projection: assistantProjection(output),
         ...(initialSystemMessages ? { initialSystemMessages: clone(initialSystemMessages) } : {}),
+        ...(toolLayout ? { toolLayout: clone(toolLayout) } : {}),
       },
     },
   };

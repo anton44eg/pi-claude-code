@@ -304,3 +304,83 @@ test("normalizes foreign tool call ids and drops foreign reasoning before replay
   assert.equal((frames[2]?.message.content[0] as { tool_use_id: string }).tool_use_id, toolUse[1]!.id);
   assert.deepEqual(messages, original);
 });
+
+test("defers tools added mid-session, including after Pi folds a forced system prompt", async () => {
+  const { supportsNativeToolChanges } = await import("../src/model-catalog.ts");
+  const tool = (name: string) =>
+    ({ name, description: name, parameters: { type: "object", properties: {} } }) as unknown as Tool;
+  const [alpha, beta, gamma] = [tool("alpha"), tool("beta"), tool("gamma")];
+  const assistant = (text: string, timestamp: number): AssistantMessage => ({
+    role: "assistant",
+    api: "test",
+    provider: "claude-code",
+    model: "opus",
+    content: [{ type: "text", text }],
+    usage,
+    stopReason: "stop",
+    timestamp,
+  });
+  const shape = (plan: ReturnType<typeof prepareNativeTranscript>) =>
+    plan!.requestTools.map((entry) => [entry.name, entry.defer_loading ?? false]);
+  const added = (name: string) => ({ type: "tool_addition", tool: { type: "tool_reference", name: `${TOOL_PREFIX}${name}` } });
+
+  for (const model of ["claude-opus-5-5", "claude-fable-5-1"]) {
+    const supported = supportsNativeToolChanges(model);
+    assert.equal(supported, true, model);
+
+    // Request 1: no tool changes yet. Its layout rides on the response.
+    const first = assistant("loading", 1);
+    const plan1 = prepareNativeTranscript(
+      [{ role: "system", content: "base", toolsAdded: [alpha], timestamp: 0 }, { role: "user", content: "go", timestamp: 0 }],
+      supported,
+    )!;
+    first.diagnostics = [makeReplayDiagnostic({ role: "assistant", content: [{ type: "text", text: "loading" }] } as never, first, undefined, plan1.toolLayout) as never];
+
+    // Request 2, unfolded: tool_search added beta after the first response.
+    const unfolded: Message[] = [
+      { role: "system", content: "base", toolsAdded: [alpha], timestamp: 0 },
+      { role: "user", content: "go", timestamp: 0 },
+      first,
+      { role: "system", content: "", toolsAdded: [beta], timestamp: 2 },
+    ];
+    const plan2 = prepareNativeTranscript(unfolded, supported)!;
+    const expected2 = [[`${TOOL_PREFIX}alpha`, false], ["__pi_deferred_placeholder__", true], [`${TOOL_PREFIX}beta`, true]];
+    assert.deepEqual(shape(plan2), expected2);
+    assert.deepEqual(plan2.systemInjections, [{ beforeAssistant: null, content: [added("beta")] }]);
+
+    // Request 2, folded the way Pi projects a forced prompt: one head holding the current tools.
+    const folded: Message[] = [
+      { role: "system", content: "forced", toolsAdded: [alpha, beta], timestamp: 0 },
+      { role: "user", content: "go", timestamp: 0 },
+      first,
+    ];
+    const plan2f = prepareNativeTranscript(folded, supported)!;
+    assert.deepEqual(shape(plan2f), expected2);
+    assert.deepEqual(plan2f.systemInjections, plan2.systemInjections);
+
+    // Request 3, folded: beta stays at its boundary, gamma is new, the tools array only grows.
+    const second = assistant("using beta", 3);
+    second.diagnostics = [makeReplayDiagnostic({ role: "assistant", content: [{ type: "text", text: "using beta" }] } as never, second, undefined, plan2f.toolLayout) as never];
+    const plan3 = prepareNativeTranscript(
+      [
+        { role: "system", content: "forced", toolsAdded: [alpha, beta, gamma], timestamp: 0 },
+        { role: "user", content: "go", timestamp: 0 },
+        first,
+        second,
+      ],
+      supported,
+    )!;
+    assert.deepEqual(shape(plan3), [...expected2, [`${TOOL_PREFIX}gamma`, true]]);
+    assert.deepEqual(plan3.systemInjections, [
+      { beforeAssistant: 1, content: [added("beta")] },
+      { beforeAssistant: null, content: [added("gamma")] },
+    ]);
+
+    // A recorded tool missing from the head is a removal: keep Pi's folded tool set.
+    const removed = prepareNativeTranscript(
+      [{ role: "system", content: "forced", toolsAdded: [beta], timestamp: 0 }, { role: "user", content: "go", timestamp: 0 }, first, second],
+      supported,
+    )!;
+    assert.deepEqual(shape(removed), [[`${TOOL_PREFIX}beta`, false], ["__pi_deferred_placeholder__", true]]);
+  }
+});

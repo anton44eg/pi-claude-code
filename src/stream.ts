@@ -29,6 +29,7 @@ import {
   prepareNativeTranscript,
   prepareTools,
   TOOL_PREFIX,
+  type NativeToolLayout,
 } from "./transcript.ts";
 
 interface IndexedText {
@@ -196,6 +197,7 @@ class EventTranslator {
     message: NativeMessage,
     usage: NativeUsage,
     initialSystemMessages?: unknown[],
+    toolLayout?: NativeToolLayout,
   ): void {
     const authoritative = nativeContent(message.content);
     if (!this.sawContentEvent) {
@@ -212,7 +214,7 @@ class EventTranslator {
     this.output.errorMessage = mapped.errorMessage;
     this.output.diagnostics = [
       ...(this.output.diagnostics ?? []),
-      makeReplayDiagnostic(message, this.output, initialSystemMessages) as never,
+      makeReplayDiagnostic(message, this.output, initialSystemMessages, toolLayout) as never,
     ];
   }
 
@@ -386,7 +388,12 @@ export function streamClaudeCode(
         sessionId: options?.cacheRetention === "none" ? undefined : options?.sessionId,
         onEvent: (event) => translator.event(event),
       });
-      translator.finish(response.message, response.usage, response.initialSystemMessages);
+      translator.finish(
+        response.message,
+        response.usage,
+        response.initialSystemMessages,
+        nativeTranscript?.toolLayout,
+      );
       output.providerThinkingLevel = options?.reasoning;
       output.diagnostics = [
         ...(output.diagnostics ?? []),
