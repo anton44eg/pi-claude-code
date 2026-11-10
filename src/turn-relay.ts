@@ -1,6 +1,8 @@
 import * as http from "node:http";
 import * as https from "node:https";
 import { randomBytes } from "node:crypto";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { AnthropicStreamEvent, NativeContentBlock, NativeMessage } from "./native-types.ts";
 
@@ -281,6 +283,7 @@ export class TurnRelay {
       this.originalRequestBody = Buffer.from(body);
       if (this.transformRequest) body = this.transformRequest(body);
       this.requestBody = Buffer.from(body);
+      await this.dumpRequest();
       if (this.cancelled) return;
 
       const headers: http.OutgoingHttpHeaders = {};
@@ -377,6 +380,18 @@ export class TurnRelay {
       response.once("close", onClose);
       response.once("error", onError);
     });
+  }
+
+  /** Debug aid: persist each turn's original and rewritten request body when PI_CLAUDE_CODE_DUMP_DIR is set. */
+  private async dumpRequest(): Promise<void> {
+    const dir = process.env.PI_CLAUDE_CODE_DUMP_DIR;
+    if (!dir || !this.originalRequestBody || !this.requestBody) return;
+    const stamp = `${new Date().toISOString().replace(/[:.]/gu, "-")}-${process.pid}`;
+    await mkdir(dir, { recursive: true });
+    await Promise.all([
+      writeFile(join(dir, `${stamp}.original.json`), this.originalRequestBody),
+      writeFile(join(dir, `${stamp}.sent.json`), this.requestBody),
+    ]);
   }
 
   private async readBody(request: http.IncomingMessage): Promise<Buffer> {
