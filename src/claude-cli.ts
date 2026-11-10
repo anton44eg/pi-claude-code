@@ -809,6 +809,29 @@ function restoreCanonicalUserContent(messages: NativeRequestMessage[], frames: N
   });
 }
 
+const isThinking = (block: unknown): boolean =>
+  isBlock(block) && (block.type === "thinking" || block.type === "redacted_thinking");
+
+/**
+ * A fresh Claude Code process replays assistant messages without their signed
+ * thinking, while a warm one keeps the thinking of the turn it just generated.
+ * Put Pi's thinking blocks back so both send the same assistant content.
+ */
+function restoreAssistantThinking(messages: NativeRequestMessage[], frames: NativeFrame[]): void {
+  const canonical = frames.filter((frame) => frame.type === "assistant");
+  const native = messages.filter((message) => message.role === "assistant");
+  if (native.length !== canonical.length) return;
+  native.forEach((message, index) => {
+    if (!Array.isArray(message.content)) return;
+    const source = canonical[index]!.message.content;
+    if (!source.some(isThinking)) return;
+    const rest = message.content.filter((block) => !isThinking(block));
+    if (rest.length !== source.filter((block) => !isThinking(block)).length) return;
+    let cursor = 0;
+    message.content = source.map((block) => (isThinking(block) ? structuredClone(block) : rest[cursor++]));
+  });
+}
+
 function injectNativeSystemMessages(
   messages: NativeRequestMessage[],
   injections: NativeSystemInjection[],
@@ -871,6 +894,7 @@ export function rewriteInitialRequest(
     throw new Error("Claude Code request is missing its initial user message");
   }
   if (messages) restoreCanonicalUserContent(messages, frames);
+  if (messages) restoreAssistantThinking(messages, frames);
 
   if (initialSystemMessages?.length && messages) {
     let systemEnd = 1;

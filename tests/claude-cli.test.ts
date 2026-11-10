@@ -205,6 +205,31 @@ test("moves a breakpoint on a dropped reminder to the canonical tail", () => {
   assert.deepEqual(rewritten[0]?.content, [{ ...text("inspect"), cache_control: marker }]);
 });
 
+test("restores signed thinking so fresh and warm replays send the same assistant content", () => {
+  const thinking = { type: "thinking", thinking: "plan", signature: "sig-1" };
+  const toolUse = { type: "tool_use", id: "t1", name: "read", input: {} };
+  const answerThinking = { type: "thinking", thinking: "", signature: "sig-2" };
+  const history: WireMessage[] = [
+    { role: "user", content: [text("inspect")] },
+    { role: "assistant", content: [thinking, toolUse] },
+    { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "result" }] },
+    { role: "assistant", content: [answerThinking, text("done")] },
+    { role: "user", content: [text("ok")] },
+  ];
+  const frames = framesFor(history);
+  const fresh = history.map((message) =>
+    message.role === "assistant"
+      ? { ...message, content: (message.content as Block[]).filter((block) => block.type !== "thinking") }
+      : message,
+  );
+  // A warm process keeps only the thinking of the turn it just generated.
+  const warm = history.map((message, index) => (index === 1 ? fresh[1]! : message));
+
+  const fromFresh = withoutMarkers(rewrite(fresh, frames));
+  assert.deepEqual(fromFresh, withoutMarkers(history));
+  assert.deepEqual(withoutMarkers(rewrite(warm, frames)), fromFresh);
+});
+
 test("refuses requests that do not line up with Pi's history", () => {
   const frames = framesFor([
     { role: "user", content: [text("inspect")] },
